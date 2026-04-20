@@ -25,6 +25,11 @@ actor RawWebSocket {
     static let opPing: UInt8   = 0x9
     static let opPong: UInt8   = 0xA
 
+    enum ConnectionError: Error {
+        case closed
+        case timeout
+    }
+
     init() {}
 
     static func connect(ip: String, domain: String, path: String = "/apiws",
@@ -72,12 +77,20 @@ actor RawWebSocket {
     }
 
     func send(_ data: Data) async throws {
-        guard !isClosed else { return }
+        guard !isClosed else { throw ConnectionError.closed }
         try await sendRaw(data)
     }
 
+    func sendBatch(_ parts: [Data]) async throws {
+        guard !isClosed else { throw ConnectionError.closed }
+        for part in parts {
+            try await sendRaw(part)
+        }
+    }
+
     func recv() async throws -> Data? {
-        return try await receiveRaw(maxLength: 65536)
+        let data = try await receiveRaw(maxLength: 65536)
+        return data.isEmpty ? nil : data
     }
 
     func close() async {
@@ -86,17 +99,31 @@ actor RawWebSocket {
     }
 
     private func sendRaw(_ data: Data) async throws {
-        guard let conn = connection else { return }
+        guard let conn = connection else { throw ConnectionError.closed }
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-            conn.send(content: data, completion: .contentProcessed { _ in cont.resume() })
+            conn.send(content: data, completion: .contentProcessed { error in
+                if let error {
+                    cont.resume(throwing: error)
+                } else {
+                    cont.resume()
+                }
+            })
         }
     }
 
     private func receiveRaw(maxLength: Int) async throws -> Data {
-        guard let conn = connection else { return Data() }
+        guard let conn = connection else { throw ConnectionError.closed }
         return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Data, Error>) in
-            conn.receive(minimumIncompleteLength: 1, maximumLength: maxLength) { data, _, _, _ in
-                cont.resume(returning: data ?? Data())
+            conn.receive(minimumIncompleteLength: 1, maximumLength: maxLength) { data, _, isComplete, error in
+                if let error {
+                    cont.resume(throwing: error)
+                } else if let data, !data.isEmpty {
+                    cont.resume(returning: data)
+                } else if isComplete {
+                    cont.resume(returning: Data())
+                } else {
+                    cont.resume(throwing: ConnectionError.closed)
+                }
             }
         }
     }
