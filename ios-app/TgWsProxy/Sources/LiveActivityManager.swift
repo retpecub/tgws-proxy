@@ -58,10 +58,13 @@ class LiveActivityManager: ObservableObject {
         let state = ProxyActivityAttributes.ContentState(
             isRunning: false, connectionsActive: 0, bytesUp: 0, bytesDown: 0
         )
-        Task {
+       Task {
+        if #available(iOS 16.2, *) {
             let content = ActivityContent(state: state, staleDate: nil)
             await activity?.end(content, dismissalPolicy: .immediate)
-            activity = nil
+        } else {
+            await activity?.end(dismissalPolicy: .immediate)
         }
+        activity = nil
     }
 }
