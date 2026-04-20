@@ -70,14 +70,14 @@ jobs:
             -framework UserNotifications \
             -framework Security
 
-          cp TgWsProxy/Info.plist "$APP_DIR/Info.plist"
+          cp TgWsProxy/Resources/Info.plist "$APP_DIR/Info.plist"
 
       - name: Compile LiveActivity extension
         working-directory: ios-app
         run: |
           set -euo pipefail
 
-          EXT_NAME="ProxyLiveActivity"
+          EXT_NAME="TgWsProxyLiveActivity"
           BUILD_DIR="$PWD/build"
           EXT_DIR="$BUILD_DIR/Payload/TgWsProxy.app/PlugIns/$EXT_NAME.appex"
 
