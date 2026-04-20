@@ -1,6 +1,5 @@
 import Foundation
 import Network
-import Security
 import os.log
 
 private let logger = Logger(subsystem: "com.tgwsproxy.app", category: "RawWebSocket")
@@ -42,6 +41,11 @@ actor RawWebSocket {
     private func performConnect(ip: String, domain: String, path: String,
                                 timeout: TimeInterval) async throws {
         let tlsOptions = NWProtocolTLS.Options()
+        sec_protocol_options_set_peer_domain(tlsOptions.securityProtocolOptions, domain)
+        // Allow self-signed / mismatched for Telegram's WS endpoints
+        sec_protocol_options_set_verify_block(tlsOptions.securityProtocolOptions, { _, _, completionHandler in
+            completionHandler(true)
+        }, DispatchQueue.global())
 
         let tcpOptions = NWProtocolTCP.Options()
         tcpOptions.noDelay = true

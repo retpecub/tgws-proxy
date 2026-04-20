@@ -32,20 +32,12 @@ class LiveActivityManager: ObservableObject {
         )
 
         do {
-            if #available(iOS 16.2, *) {
-                let content = ActivityContent(state: state, staleDate: nil)
-                activity = try Activity.request(
-                    attributes: attributes,
-                    content: content,
-                    pushType: nil
-                )
-            } else {
-                activity = try Activity.request(
-                    attributes: attributes,
-                    contentState: state,
-                    pushType: nil
-                )
-            }
+            let content = ActivityContent(state: state, staleDate: nil)
+            activity = try Activity.request(
+                attributes: attributes,
+                content: content,
+                pushType: nil
+            )
         } catch {
             print("Failed to start Live Activity: \(error)")
         }
@@ -56,14 +48,9 @@ class LiveActivityManager: ObservableObject {
             isRunning: true, connectionsActive: connections,
             bytesUp: bytesUp, bytesDown: bytesDown
         )
-
         Task {
-            if #available(iOS 16.2, *) {
-                let content = ActivityContent(state: state, staleDate: nil)
-                await activity?.update(content)
-            } else {
-                await activity?.update(using: state)
-            }
+            let content = ActivityContent(state: state, staleDate: nil)
+            await activity?.update(content)
         }
     }
 
@@ -71,14 +58,9 @@ class LiveActivityManager: ObservableObject {
         let state = ProxyActivityAttributes.ContentState(
             isRunning: false, connectionsActive: 0, bytesUp: 0, bytesDown: 0
         )
-
         Task {
-            if #available(iOS 16.2, *) {
-                let content = ActivityContent(state: state, staleDate: nil)
-                await activity?.end(content, dismissalPolicy: .immediate)
-            } else {
-                await activity?.end(dismissalPolicy: .immediate)
-            }
+            let content = ActivityContent(state: state, staleDate: nil)
+            await activity?.end(content, dismissalPolicy: .immediate)
             activity = nil
         }
     }

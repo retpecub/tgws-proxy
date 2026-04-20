@@ -11,6 +11,7 @@ final class MTProtoProxyServer: @unchecked Sendable {
     private var listener: NWListener?
     private var statsCallback: ((ProxyStats) -> Void)?
     private var stats = ProxyStats()
+    private let statsLock = NSLock()
 
     init(config: ProxyConfig, statsCallback: ((ProxyStats) -> Void)? = nil) {
         self.config = config
@@ -54,12 +55,14 @@ final class MTProtoProxyServer: @unchecked Sendable {
             listener?.start(queue: DispatchQueue.global(qos: .userInitiated))
         }
 
-        Task { [weak self] in
-            while self?.listener != nil {
+        // Start periodic stats reporting
+        Task {
+            while listener != nil {
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
-                guard let self else { break }
-                let currentStats = self.stats
-                self.statsCallback?(currentStats)
+                statsLock.lock()
+                let currentStats = stats
+                statsLock.unlock()
+                statsCallback?(currentStats)
             }
         }
     }
@@ -74,22 +77,21 @@ final class MTProtoProxyServer: @unchecked Sendable {
     private func handleNewConnection(_ connection: NWConnection) {
         connection.start(queue: DispatchQueue.global(qos: .userInitiated))
 
+        statsLock.lock()
         stats.connectionsTotal += 1
         stats.connectionsActive += 1
+        statsLock.unlock()
 
-        Task { [weak self] in
-            guard let self else {
-                connection.cancel()
-                return
-            }
-
+        Task {
             defer {
-                self.stats.connectionsActive -= 1
+                statsLock.lock()
+                stats.connectionsActive -= 1
+                statsLock.unlock()
                 connection.cancel()
             }
 
             do {
-                try await self.processClient(connection)
+                try await processClient(connection)
             } catch {
                 logger.debug("Client connection error: \(error)")
             }
@@ -97,15 +99,20 @@ final class MTProtoProxyServer: @unchecked Sendable {
     }
 
     private func processClient(_ connection: NWConnection) async throws {
+        // Wait for connection ready
         try await waitForReady(connection)
 
+        // Read 64-byte handshake
         let handshakeData = try await receiveExact(connection, count: HANDSHAKE_LEN)
         let handshake = [UInt8](handshakeData)
 
         let secretBytes = hexToBytes(config.secret)
         guard let result = tryHandshake(handshake, secret: secretBytes) else {
+            statsLock.lock()
             stats.connectionsBad += 1
+            statsLock.unlock()
             logger.debug("Bad handshake (wrong secret or proto)")
+            // Drain remaining data to look like a normal connection
             _ = try? await receiveData(connection, maxLength: 4096)
             return
         }
@@ -113,6 +120,7 @@ final class MTProtoProxyServer: @unchecked Sendable {
         let dcIdx = result.isMedia ? -result.dcId : result.dcId
         let relayInit = generateRelayInit(protoTag: result.protoTag, dcIdx: dcIdx)
 
+        // Build client cipher pair (decrypt from client, encrypt to client)
         let cltDecPrekey = Array(result.clientDecPrekeyIV[0..<PREKEY_LEN])
         let cltDecIV = Array(result.clientDecPrekeyIV[PREKEY_LEN...])
         let cltDecKey = sha256(cltDecPrekey + secretBytes)
@@ -124,8 +132,10 @@ final class MTProtoProxyServer: @unchecked Sendable {
         let cltDecryptor = AESCTR(key: cltDecKey, iv: cltDecIV)
         let cltEncryptor = AESCTR(key: cltEncKey, iv: cltEncIV)
 
+        // Fast-forward past 64-byte init
         _ = cltDecryptor.process(ZERO_64)
 
+        // Relay side: standard obfuscation (no secret hash)
         let relayEncKey = Array(relayInit[SKIP_LEN ..< SKIP_LEN + PREKEY_LEN])
         let relayEncIV = Array(relayInit[SKIP_LEN + PREKEY_LEN ..< SKIP_LEN + PREKEY_LEN + IV_LEN])
 
@@ -137,10 +147,12 @@ final class MTProtoProxyServer: @unchecked Sendable {
         let tgDecryptor = AESCTR(key: relayDecKey, iv: relayDecIV)
         _ = tgEncryptor.process(ZERO_64)
 
+        // Try connecting via WebSocket
         let mediaTag = result.isMedia ? "m" : ""
         logger.info("Handshake ok: DC\(result.dcId)\(mediaTag)")
 
         guard let targetIP = config.dcRedirects[result.dcId] else {
+            // DC not in config — try TCP fallback
             if let fallbackIP = ProxyConfig.dcDefaultIPs[result.dcId] {
                 logger.info("DC\(result.dcId) not in config, TCP fallback to \(fallbackIP):443")
                 try await tcpFallback(
@@ -167,12 +179,15 @@ final class MTProtoProxyServer: @unchecked Sendable {
                 logger.warning("DC\(result.dcId)\(mediaTag) got \(error.statusCode) redirect")
                 continue
             } catch {
+                statsLock.lock()
                 stats.wsErrors += 1
+                statsLock.unlock()
                 logger.warning("DC\(result.dcId)\(mediaTag) WS connect failed: \(error)")
             }
         }
 
         guard let activeWS = ws else {
+            // WS failed — TCP fallback
             let fallbackIP = ProxyConfig.dcDefaultIPs[result.dcId] ?? targetIP
             logger.info("DC\(result.dcId)\(mediaTag) WS failed, TCP fallback to \(fallbackIP):443")
             try await tcpFallback(
@@ -184,12 +199,17 @@ final class MTProtoProxyServer: @unchecked Sendable {
             return
         }
 
+        statsLock.lock()
         stats.connectionsWS += 1
+        statsLock.unlock()
 
+        // Build splitter
         let splitter = MsgSplitter(relayInit: relayInit, protoInt: result.protoInt)
 
+        // Send relay init to Telegram
         try await activeWS.send(Data(relayInit))
 
+        // Bridge: client TCP <-> Telegram WS with re-encryption
         try await bridgeWSReencrypt(
             connection: connection, ws: activeWS,
             cltDecryptor: cltDecryptor, cltEncryptor: cltEncryptor,
@@ -207,13 +227,16 @@ final class MTProtoProxyServer: @unchecked Sendable {
         splitter: MsgSplitter
     ) async throws {
         try await withThrowingTaskGroup(of: Void.self) { group in
+            // TCP -> WS (client to Telegram)
             group.addTask { [weak self] in
                 do {
                     while true {
                         let chunk = try await self?.receiveData(connection, maxLength: 65536)
                         guard let chunk, !chunk.isEmpty else { break }
 
+                        self?.statsLock.lock()
                         self?.stats.bytesUp += UInt64(chunk.count)
+                        self?.statsLock.unlock()
 
                         let plain = cltDecryptor.process(chunk)
                         let encrypted = tgEncryptor.process(plain)
@@ -228,16 +251,20 @@ final class MTProtoProxyServer: @unchecked Sendable {
                         }
                     }
                 } catch {
+                    // Connection closed
                 }
                 await ws.close()
             }
 
+            // WS -> TCP (Telegram to client)
             group.addTask { [weak self] in
                 do {
                     while true {
                         guard let data = try await ws.recv() else { break }
 
+                        self?.statsLock.lock()
                         self?.stats.bytesDown += UInt64(data.count)
+                        self?.statsLock.unlock()
 
                         let plain = tgDecryptor.process(data)
                         let encrypted = cltEncryptor.process(plain)
@@ -245,10 +272,12 @@ final class MTProtoProxyServer: @unchecked Sendable {
                         try await self?.sendData(connection, data: encrypted)
                     }
                 } catch {
+                    // Connection closed
                 }
                 connection.cancel()
             }
 
+            // Wait for either direction to finish
             try await group.next()
             group.cancelAll()
         }
@@ -275,42 +304,46 @@ final class MTProtoProxyServer: @unchecked Sendable {
 
         try await waitForReady(remote)
 
+        // Send relay init
         try await sendData(remote, data: Data(relayInit))
 
+        statsLock.lock()
         stats.connectionsTCPFallback += 1
+        statsLock.unlock()
 
+        // Bridge TCP <-> TCP with re-encryption
         try await withThrowingTaskGroup(of: Void.self) { group in
+            // Client -> Remote
             group.addTask { [weak self] in
                 do {
                     while true {
                         let data = try await self?.receiveData(connection, maxLength: 65536)
                         guard let data, !data.isEmpty else { break }
-
+                        self?.statsLock.lock()
                         self?.stats.bytesUp += UInt64(data.count)
-
+                        self?.statsLock.unlock()
                         let plain = cltDecryptor.process(data)
                         let enc = tgEncryptor.process(plain)
                         try await self?.sendData(remote, data: enc)
                     }
-                } catch {
-                }
+                } catch {}
                 remote.cancel()
             }
 
+            // Remote -> Client
             group.addTask { [weak self] in
                 do {
                     while true {
                         let data = try await self?.receiveData(remote, maxLength: 65536)
                         guard let data, !data.isEmpty else { break }
-
+                        self?.statsLock.lock()
                         self?.stats.bytesDown += UInt64(data.count)
-
+                        self?.statsLock.unlock()
                         let plain = tgDecryptor.process(data)
                         let enc = cltEncryptor.process(plain)
                         try await self?.sendData(connection, data: enc)
                     }
-                } catch {
-                }
+                } catch {}
                 connection.cancel()
             }
 
