@@ -57,7 +57,6 @@ struct ContentView: View {
             Image(systemName: proxy.isRunning ? "antenna.radiowaves.left.and.right" : "antenna.radiowaves.left.and.right.slash")
                 .font(.system(size: 48))
                 .foregroundStyle(proxy.isRunning ? .green : .secondary)
-                .symbolEffect(.pulse, isActive: proxy.isRunning)
 
             Text(proxy.isRunning ? "Прокси активен" : "Прокси остановлен")
                 .font(.headline)
