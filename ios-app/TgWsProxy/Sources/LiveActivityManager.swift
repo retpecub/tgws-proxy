@@ -32,12 +32,20 @@ class LiveActivityManager: ObservableObject {
         )
 
         do {
-            let content = ActivityContent(state: state, staleDate: nil)
-            activity = try Activity.request(
-                attributes: attributes,
-                content: content,
-                pushType: nil
-            )
+            if #available(iOS 16.2, *) {
+                let content = ActivityContent(state: state, staleDate: nil)
+                activity = try Activity.request(
+                    attributes: attributes,
+                    content: content,
+                    pushType: nil
+                )
+            } else {
+                activity = try Activity.request(
+                    attributes: attributes,
+                    contentState: state,
+                    pushType: nil
+                )
+            }
         } catch {
             print("Failed to start Live Activity: \(error)")
         }
@@ -48,9 +56,14 @@ class LiveActivityManager: ObservableObject {
             isRunning: true, connectionsActive: connections,
             bytesUp: bytesUp, bytesDown: bytesDown
         )
+
         Task {
-            let content = ActivityContent(state: state, staleDate: nil)
-            await activity?.update(content)
+            if #available(iOS 16.2, *) {
+                let content = ActivityContent(state: state, staleDate: nil)
+                await activity?.update(content)
+            } else {
+                await activity?.update(using: state)
+            }
         }
     }
 
@@ -58,13 +71,15 @@ class LiveActivityManager: ObservableObject {
         let state = ProxyActivityAttributes.ContentState(
             isRunning: false, connectionsActive: 0, bytesUp: 0, bytesDown: 0
         )
-       Task {
-        if #available(iOS 16.2, *) {
-            let content = ActivityContent(state: state, staleDate: nil)
-            await activity?.end(content, dismissalPolicy: .immediate)
-        } else {
-            await activity?.end(dismissalPolicy: .immediate)
+
+        Task {
+            if #available(iOS 16.2, *) {
+                let content = ActivityContent(state: state, staleDate: nil)
+                await activity?.end(content, dismissalPolicy: .immediate)
+            } else {
+                await activity?.end(dismissalPolicy: .immediate)
+            }
+            activity = nil
         }
-        activity = nil
     }
 }
