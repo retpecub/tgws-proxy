@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import Security
 import os.log
 
 private let logger = Logger(subsystem: "com.tgwsproxy.app", category: "RawWebSocket")
